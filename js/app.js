@@ -192,6 +192,35 @@ export function splitTimeString(timeStr) {
   };
 }
 
+// --- MONTH & WAGE HELPERS ---
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"
+];
+
+export function getMonthName(monthNumber) {
+  return MONTH_NAMES[(Number(monthNumber) || 1) - 1] || "";
+}
+
+// Retrieves month-specific hourly wage with backwards-compatible legacy fallback
+export function getStaffWageForMonth(staff, year, month) {
+  if (!staff) return 0;
+  const monthKey = `${year}-${String(month).padStart(2, "0")}`;
+
+  // 1. Month-specific wage if explicitly defined in monthlyWages map
+  if (staff.monthlyWages && typeof staff.monthlyWages[monthKey] === "number" && !isNaN(staff.monthlyWages[monthKey])) {
+    return staff.monthlyWages[monthKey];
+  }
+
+  // 2. Backward compatibility: Fall back to legacy global hourly wage
+  if (typeof staff.hourlyWage === "number" && !isNaN(staff.hourlyWage) && staff.hourlyWage > 0) {
+    return staff.hourlyWage;
+  }
+
+  // 3. Application default
+  return 30;
+}
+
 // --- DURATION FORMATTING HELPER ---
 // Converts total elapsed minutes into clean "Xh Ym" string (e.g., 730 mins -> "12h 10m", 480 mins -> "8h 0m")
 export function formatMinutesToDuration(totalMinutes) {
@@ -323,6 +352,64 @@ function updateDateRangeFromMonthYear(year, month) {
   if (toInput) toInput.value = currentToDate;
 }
 
+function syncMonthlyWageInput() {
+  const input = document.getElementById("ledger-monthly-wage-input");
+  const staff = staffList.find(s => s.id === activeStaffId);
+  if (!input) return;
+
+  if (!staff) {
+    input.value = "";
+    input.disabled = true;
+    return;
+  }
+
+  input.disabled = false;
+  const wage = getStaffWageForMonth(staff, currentYear, currentMonth);
+  input.value = wage;
+
+  // Also keep active staff subtitle synchronized
+  const monthName = getMonthName(currentMonth);
+  const subtitle = document.getElementById("active-staff-subtitle");
+  if (subtitle) {
+    subtitle.textContent = `${staff.standardHours || 8}h Fixed Standard • ${APP_CONFIG.currency}${wage}/hr (${monthName} ${currentYear})`;
+  }
+}
+
+async function saveCurrentMonthWage(newWage) {
+  if (!activeStaffId) return;
+  const wageNum = Math.max(0, Number(newWage) || 0);
+  const monthKey = `${currentYear}-${String(currentMonth).padStart(2, "0")}`;
+
+  try {
+    await setDoc(doc(db, "staff", activeStaffId), {
+      monthlyWages: {
+        [monthKey]: wageNum
+      },
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+
+    // Update locally cached staff object immediately
+    const staff = staffList.find(s => s.id === activeStaffId);
+    if (staff) {
+      if (!staff.monthlyWages) staff.monthlyWages = {};
+      staff.monthlyWages[monthKey] = wageNum;
+    }
+
+    const monthName = getMonthName(currentMonth);
+    const subtitle = document.getElementById("active-staff-subtitle");
+    if (subtitle && staff) {
+      subtitle.textContent = `${staff.standardHours || 8}h Fixed Standard • ${APP_CONFIG.currency}${wageNum}/hr (${monthName} ${currentYear})`;
+    }
+
+    renderLedgerDayCards();
+    updateLiveSummary();
+    showToast(`Wage for ${monthName} ${currentYear} set to ${APP_CONFIG.currency}${wageNum}/hr`, "success");
+  } catch (err) {
+    console.error("Save monthly wage error:", err);
+    showToast("Failed to save monthly wage: " + err.message, "error");
+  }
+}
+
 function bindGlobalEvents() {
   // Month & Year Selector
   const monthSelect = document.getElementById("ledger-month-select");
@@ -331,6 +418,7 @@ function bindGlobalEvents() {
   monthSelect?.addEventListener("change", () => {
     currentMonth = Number(monthSelect.value);
     updateDateRangeFromMonthYear(currentYear, currentMonth);
+    syncMonthlyWageInput();
     renderLedgerDayCards();
     updateLiveSummary();
   });
@@ -338,6 +426,7 @@ function bindGlobalEvents() {
   yearSelect?.addEventListener("change", () => {
     currentYear = Number(yearSelect.value);
     updateDateRangeFromMonthYear(currentYear, currentMonth);
+    syncMonthlyWageInput();
     renderLedgerDayCards();
     updateLiveSummary();
   });
@@ -351,6 +440,7 @@ function bindGlobalEvents() {
     if (monthSelect) monthSelect.value = String(currentMonth);
     if (yearSelect) yearSelect.value = String(currentYear);
     updateDateRangeFromMonthYear(currentYear, currentMonth);
+    syncMonthlyWageInput();
     renderLedgerDayCards();
     updateLiveSummary();
   });
@@ -364,6 +454,7 @@ function bindGlobalEvents() {
     if (monthSelect) monthSelect.value = String(currentMonth);
     if (yearSelect) yearSelect.value = String(currentYear);
     updateDateRangeFromMonthYear(currentYear, currentMonth);
+    syncMonthlyWageInput();
     renderLedgerDayCards();
     updateLiveSummary();
   });
@@ -375,8 +466,62 @@ function bindGlobalEvents() {
     if (monthSelect) monthSelect.value = String(currentMonth);
     if (yearSelect) yearSelect.value = String(currentYear);
     updateDateRangeFromMonthYear(currentYear, currentMonth);
+    syncMonthlyWageInput();
     renderLedgerDayCards();
     updateLiveSummary();
+  });
+
+  // Monthly Wage Input Listeners
+  const monthlyWageInput = document.getElementById("ledger-monthly-wage-input");
+  let wageDebounceTimer = null;
+
+  monthlyWageInput?.addEventListener("input", () => {
+    const rawVal = monthlyWageInput.value.trim();
+    if (rawVal === "") return;
+    const newWage = Number(rawVal);
+    if (isNaN(newWage) || newWage < 0) return;
+
+    // Optimistically update cached staff wage for instant UI feedback
+    const staff = staffList.find(s => s.id === activeStaffId);
+    if (staff) {
+      if (!staff.monthlyWages) staff.monthlyWages = {};
+      const monthKey = `${currentYear}-${String(currentMonth).padStart(2, "0")}`;
+      staff.monthlyWages[monthKey] = newWage;
+
+      const monthName = getMonthName(currentMonth);
+      const subtitle = document.getElementById("active-staff-subtitle");
+      if (subtitle) {
+        subtitle.textContent = `${staff.standardHours || 8}h Fixed Standard • ${APP_CONFIG.currency}${newWage}/hr (${monthName} ${currentYear})`;
+      }
+      renderLedgerDayCards();
+      updateLiveSummary();
+    }
+
+    if (wageDebounceTimer) clearTimeout(wageDebounceTimer);
+    wageDebounceTimer = setTimeout(() => {
+      saveCurrentMonthWage(newWage);
+    }, 600);
+  });
+
+  monthlyWageInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      monthlyWageInput.blur();
+    }
+  });
+
+  monthlyWageInput?.addEventListener("blur", () => {
+    if (wageDebounceTimer) {
+      clearTimeout(wageDebounceTimer);
+      wageDebounceTimer = null;
+    }
+    const rawVal = monthlyWageInput.value.trim();
+    const newWage = Number(rawVal);
+    if (rawVal !== "" && !isNaN(newWage) && newWage >= 0) {
+      saveCurrentMonthWage(newWage);
+    } else {
+      // Revert to current saved wage
+      syncMonthlyWageInput();
+    }
   });
 
   // Sidebar Date Filter Inputs
@@ -472,6 +617,8 @@ function listenToStaffProfiles() {
     } else if (staffList.length > 0) {
       if (!activeStaffId || !staffList.some(s => s.id === activeStaffId)) {
         selectStaff(staffList[0].id);
+      } else {
+        syncMonthlyWageInput();
       }
     } else {
       activeStaffId = null;
@@ -509,9 +656,6 @@ function renderStaffSelector() {
           ${s.name.charAt(0).toUpperCase()}
         </span>
         <span>${s.name}</span>
-        <span class="${isActive ? 'text-emerald-100' : 'text-slate-400'} font-normal text-[11px] font-mono-numbers">
-          ${APP_CONFIG.currency}${s.hourlyWage}/h
-        </span>
       </button>
     `;
   }).join("");
@@ -529,10 +673,13 @@ function selectStaff(staffId) {
   const staff = staffList.find(s => s.id === staffId);
   if (staff) {
     document.getElementById("active-staff-title").textContent = staff.name;
-    document.getElementById("active-staff-subtitle").textContent = `${APP_CONFIG.currency}${staff.hourlyWage}/hr • ${staff.standardHours}h Fixed Standard`;
+    const currentWage = getStaffWageForMonth(staff, currentYear, currentMonth);
+    const monthName = getMonthName(currentMonth);
+    document.getElementById("active-staff-subtitle").textContent = `${staff.standardHours || 8}h Fixed Standard • ${APP_CONFIG.currency}${currentWage}/hr (${monthName} ${currentYear})`;
     document.getElementById("active-staff-badge-container")?.classList.remove("hidden");
   }
 
+  syncMonthlyWageInput();
   loadStaffLedger(staffId);
 }
 
@@ -541,7 +688,6 @@ function openAddStaffModal() {
   document.getElementById("staff-input-id").value = "";
   document.getElementById("staff-input-name").value = "";
   document.getElementById("staff-input-hours").value = "8";
-  document.getElementById("staff-input-wage").value = "30";
   document.getElementById("staff-delete-btn")?.classList.add("hidden");
   document.getElementById("staff-modal").classList.add("active");
   document.getElementById("staff-input-name")?.focus();
@@ -555,7 +701,6 @@ function openEditActiveStaffModal() {
   document.getElementById("staff-input-id").value = staff.id;
   document.getElementById("staff-input-name").value = staff.name;
   document.getElementById("staff-input-hours").value = staff.standardHours || 8;
-  document.getElementById("staff-input-wage").value = staff.hourlyWage || 30;
   document.getElementById("staff-delete-btn")?.classList.remove("hidden");
   document.getElementById("staff-modal").classList.add("active");
 }
@@ -568,7 +713,6 @@ async function saveStaffProfile() {
   const id = document.getElementById("staff-input-id").value;
   const name = document.getElementById("staff-input-name").value.trim();
   const standardHours = Number(document.getElementById("staff-input-hours").value) || 8;
-  const hourlyWage = Number(document.getElementById("staff-input-wage").value) || 0;
 
   if (!name) {
     showToast("Please enter employee name.", "warning");
@@ -577,11 +721,15 @@ async function saveStaffProfile() {
 
   try {
     if (!id) {
+      const monthKey = `${currentYear}-${String(currentMonth).padStart(2, "0")}`;
       const newRef = doc(collection(db, "staff"));
       await setDoc(newRef, {
         name,
         standardHours,
-        hourlyWage,
+        hourlyWage: 30, // Preserve for legacy compatibility
+        monthlyWages: {
+          [monthKey]: 30
+        },
         createdAt: serverTimestamp()
       });
       showToast(`Added staff profile for ${name}!`, "success");
@@ -590,7 +738,6 @@ async function saveStaffProfile() {
       await setDoc(doc(db, "staff", id), {
         name,
         standardHours,
-        hourlyWage,
         updatedAt: serverTimestamp()
       }, { merge: true });
       showToast(`Updated profile for ${name}!`, "success");
@@ -700,7 +847,6 @@ function renderLedgerDayCards() {
   const dates = generateDateRangeArray(currentFromDate, currentToDate);
   const staff = staffList.find(s => s.id === activeStaffId);
   const standardHours = staff ? (staff.standardHours || 8) : 8;
-  const hourlyWage = staff ? Number(staff.hourlyWage || 0) : 0;
 
   if (dates.length === 0) {
     cardsContainer.innerHTML = `
@@ -712,6 +858,9 @@ function renderLedgerDayCards() {
   }
 
   cardsContainer.innerHTML = dates.map((dateStr, index) => {
+    const [cardY, cardM] = dateStr.split("-").map(Number);
+    const dayWage = getStaffWageForMonth(staff, cardY, cardM);
+
     const entry = ledgerMap[dateStr] || {};
     const inTime = entry.inTime || "";
     const outTime = entry.outTime || "";
@@ -745,7 +894,7 @@ function renderLedgerDayCards() {
         </span>
       `;
     } else if (status === "weekoff") {
-      const weekOffWage = Math.round(standardHours * hourlyWage);
+      const weekOffWage = Math.round(standardHours * dayWage);
       const weekOffDuration = formatMinutesToDuration(standardHours * 60);
       mathPillHTML = `
         <span class="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 font-mono-numbers font-bold text-xs">
@@ -761,7 +910,7 @@ function renderLedgerDayCards() {
         </span>
       `;
     } else if (status === "holiday") {
-      const holidayWage = Math.round(standardHours * hourlyWage);
+      const holidayWage = Math.round(standardHours * dayWage);
       const holidayDuration = formatMinutesToDuration(standardHours * 60);
       mathPillHTML = `
         <span class="inline-flex items-center space-x-1 px-2.5 py-0.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 font-mono-numbers font-bold text-xs">
@@ -780,7 +929,7 @@ function renderLedgerDayCards() {
       // Default: Working Status
       const shift = calculateShiftHours(inTime, outTime, standardHours);
       if (shift) {
-        const badges = getShiftBadgesHTML(shift, hourlyWage);
+        const badges = getShiftBadgesHTML(shift, dayWage);
         mathPillHTML = badges.mathPillHTML;
         dailyWageHTML = badges.dailyWageHTML;
       } else if (inTime && !outTime) {
@@ -880,7 +1029,7 @@ function renderLedgerDayCards() {
                 <div class="flex items-center space-x-1.5">
                   <span class="text-xs font-black uppercase tracking-wider text-blue-700">WEEK OFF</span>
                   <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span>
-                  <span class="text-[11px] text-blue-700 font-bold">${standardHours}h Paid Std (${APP_CONFIG.currency}${Math.round(standardHours * hourlyWage)})</span>
+                  <span class="text-[11px] text-blue-700 font-bold">${standardHours}h Paid Std (${APP_CONFIG.currency}${Math.round(standardHours * dayWage)})</span>
                 </div>
                 <div class="text-[10px] text-blue-400 font-medium">Auto-calculated standard daily wage</div>
               </div>
@@ -894,7 +1043,7 @@ function renderLedgerDayCards() {
                 <div class="flex items-center space-x-1.5">
                   <span class="text-xs font-black uppercase tracking-wider text-amber-700">HOLIDAY</span>
                   <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-                  <span class="text-[11px] text-amber-700 font-bold">${standardHours}h Paid Std (${APP_CONFIG.currency}${Math.round(standardHours * hourlyWage)})</span>
+                  <span class="text-[11px] text-amber-700 font-bold">${standardHours}h Paid Std (${APP_CONFIG.currency}${Math.round(standardHours * dayWage)})</span>
                 </div>
                 <div class="text-[10px] text-amber-500 font-medium">Auto-calculated standard daily wage</div>
               </div>
@@ -1396,7 +1545,8 @@ function commitPickerToLedger(dateStr, field, immediate = false) {
   // Live Math & Daily Wage
   const staff = staffList.find(s => s.id === activeStaffId);
   const stdHours = staff ? (staff.standardHours || 8) : 8;
-  const hourlyWage = staff ? Number(staff.hourlyWage || 0) : 0;
+  const [cardY, cardM] = dateStr.split("-").map(Number);
+  const hourlyWage = getStaffWageForMonth(staff, cardY, cardM);
   const shift = calculateShiftHours(ledgerMap[dateStr].inTime, ledgerMap[dateStr].outTime, stdHours);
 
   const mathPill = document.getElementById(`math-pill-${dateStr}`);
@@ -1744,27 +1894,35 @@ async function saveLedgerDayToFirestore(dateStr) {
 
 function updateLiveSummary() {
   const staff = staffList.find(s => s.id === activeStaffId);
-  const wage = staff ? Number(staff.hourlyWage || 0) : 0;
   const stdHours = staff ? Number(staff.standardHours || 8) : 8;
 
-  let totalRegMinutes = 0;
-  let totalOtMinutes = 0;
   let totalCredits = 0;
   let totalDebits = 0;
 
   const dates = generateDateRangeArray(currentFromDate, currentToDate);
+  const monthAggregates = {};
 
   dates.forEach((dateStr) => {
+    const [yStr, mStr] = dateStr.split("-");
+    const monthKey = `${yStr}-${mStr}`;
+    if (!monthAggregates[monthKey]) {
+      monthAggregates[monthKey] = {
+        regMinutes: 0,
+        otMinutes: 0,
+        wage: getStaffWageForMonth(staff, Number(yStr), Number(mStr))
+      };
+    }
+
     const entry = ledgerMap[dateStr];
     if (entry) {
       const status = entry.status || "working";
       if (status === "weekoff" || status === "holiday") {
-        totalRegMinutes += Math.round(stdHours * 60);
+        monthAggregates[monthKey].regMinutes += Math.round(stdHours * 60);
       } else if (status === "working") {
         const shift = calculateShiftHours(entry.inTime, entry.outTime, stdHours);
         if (shift) {
-          totalRegMinutes += shift.regMinutes;
-          totalOtMinutes += shift.otMinutes;
+          monthAggregates[monthKey].regMinutes += shift.regMinutes;
+          monthAggregates[monthKey].otMinutes += shift.otMinutes;
         }
       }
       // Note: If status === "leave", 0 hours/minutes added to regular & OT
@@ -1773,9 +1931,19 @@ function updateLiveSummary() {
     }
   });
 
-  const regWage = (totalRegMinutes / 60) * wage;
-  const otWage = (totalOtMinutes / 60) * wage; // Flat hourly wage, no OT multiplier
-  const grossPay = regWage + otWage;
+  let totalRegMinutes = 0;
+  let totalOtMinutes = 0;
+  let totalRegWage = 0;
+  let totalOtWage = 0;
+
+  Object.values(monthAggregates).forEach((b) => {
+    totalRegMinutes += b.regMinutes;
+    totalOtMinutes += b.otMinutes;
+    totalRegWage += (b.regMinutes / 60) * b.wage;
+    totalOtWage += (b.otMinutes / 60) * b.wage;
+  });
+
+  const grossPay = totalRegWage + totalOtWage;
   // Formula: (Reg Wage + OT Wage + Credits) - Debits rounded to nearest Rupee
   const finalPayout = Math.max(0, Math.round(grossPay + totalCredits - totalDebits));
 
@@ -1790,9 +1958,9 @@ function updateLiveSummary() {
 
   if (payoutEl) payoutEl.textContent = `${APP_CONFIG.currency}${finalPayout.toLocaleString("en-IN")}`;
   if (regHoursEl) regHoursEl.textContent = formatMinutesToDuration(totalRegMinutes);
-  if (regWageEl) regWageEl.textContent = `${APP_CONFIG.currency}${Math.round(regWage).toLocaleString("en-IN")}`;
+  if (regWageEl) regWageEl.textContent = `${APP_CONFIG.currency}${Math.round(totalRegWage).toLocaleString("en-IN")}`;
   if (otHoursEl) otHoursEl.textContent = formatMinutesToDuration(totalOtMinutes);
-  if (otWageEl) otWageEl.textContent = `${APP_CONFIG.currency}${Math.round(otWage).toLocaleString("en-IN")}`;
+  if (otWageEl) otWageEl.textContent = `${APP_CONFIG.currency}${Math.round(totalOtWage).toLocaleString("en-IN")}`;
   if (creditTotalEl) creditTotalEl.textContent = `+${APP_CONFIG.currency}${totalCredits.toLocaleString("en-IN")}`;
   if (debitTotalEl) debitTotalEl.textContent = `-${APP_CONFIG.currency}${totalDebits.toLocaleString("en-IN")}`;
 }

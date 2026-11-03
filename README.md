@@ -51,12 +51,19 @@ A fast, zero-authentication, fully responsive web application for managing retai
   * Displays an amber note badge snippet on the main card header with click-to-edit capability.
   * Preserved surgically in Cloud Firestore with `{ merge: true }` to guarantee zero data loss.
 
-### 5. Financial Entries (Credits & Debits):
+### 5. Month-Specific Hourly Wages (Zero Historical Data Corruption):
+* **Decoupled from Staff Profile:** Hourly wage is no longer a static global variable on the staff profile. Changing an employee's wage for the current or upcoming month will never retroactively modify or corrupt historical calculations for past months.
+* **Direct Navigation Bar Control:** The Hourly Wage rate (`₹/hr`) is configured directly in the top navigation bar right beside the `< [Month] [Year] >` selector.
+* **Month-Specific Storage:** Wages are saved surgically into a `monthlyWages: { "YYYY-MM": number }` map on each employee's document in Cloud Firestore.
+* **100% Backwards Compatible Fallback:** Historical records automatically read the employee's legacy global hourly wage if no month-specific rate has been explicitly set for that month.
+* **Multi-Month Date Range Support:** Cross-month ledger ranges (e.g., Oct 25 – Nov 10) intelligently aggregate each day's regular and overtime hours against its specific calendar month wage rate.
+
+### 6. Financial Entries (Credits & Debits):
 * **Amount & Note / Reason:** Record Credits (e.g. `+ ₹200 (Bonus, Travel)`) and Debits (e.g. `- ₹100 (Cash Advance, Penalty)`) with dedicated reason notes.
 * **Database Persistence:** Adjustments are written directly to Firestore (`setDoc` with merge) before modal dismissal, ensuring adjustments persist reliably across page reloads.
 * **Summary Breakdown:** Clicking **Credits (+)** or **Debits (-)** in the summary card opens a popup detailing every date, note, and amount with direct **Edit** shortcuts.
 
-### 6. Safe Deletions (Confirm Prompts):
+### 7. Safe Deletions (Confirm Prompts):
 * **Shift Erasure Confirmation:** Clicking the trash icon on a daily shift prompts `window.confirm` before clearing the recorded hours.
 * **Financial Adjustments Confirmation:** Removing individual Credits, Debits, or clearing all financials requires user confirmation to prevent accidental data loss.
 * **Staff Profile Cascade:** Deleting a staff member prompts confirmation and cascade-deletes all associated ledger documents from Cloud Firestore.
